@@ -6,3 +6,533 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+enum InstallationAccountType {
+  USER
+  ORGANIZATION
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum PullRequestState {
+  OPEN
+  CLOSED
+  MERGED
+}
+
+enum AnalysisStatus {
+  PENDING
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum AnalysisTrigger {
+  WEBHOOK
+  MANUAL
+  REANALYSIS
+}
+
+enum FindingSeverity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+enum FindingCategory {
+  BUG
+  SECURITY
+  PERFORMANCE
+  CODE_QUALITY
+  LOGIC_ERROR
+  MEMORY
+  CONCURRENCY
+  TEST_COVERAGE
+  BEST_PRACTICE
+}
+
+enum FindingStatus {
+  OPEN
+  ACCEPTED
+  DISMISSED
+  FIXED
+}
+
+enum SymbolKind {
+  FUNCTION
+  METHOD
+  CLASS
+  INTERFACE
+  VARIABLE
+  CONSTANT
+  MODULE
+  TYPE
+  ENUM
+}
+
+enum DependencyKind {
+  CALLS
+  IMPORTS
+  EXTENDS
+  IMPLEMENTS
+  REFERENCES
+}
+
+enum FeedbackType {
+  HELPFUL
+  NOT_HELPFUL
+  FALSE_POSITIVE
+  FIXED
+  IGNORED
+}
+
+enum WebhookStatus {
+  RECEIVED
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+enum PublicationStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+}
+
+// ==========================================
+// 1. USER & AUTHENTICATION
+// ==========================================
+
+model User {
+  id           String   @id @default(cuid())
+  githubUserId BigInt   @unique
+  githubLogin  String   @unique
+  name         String?
+  email        String?
+  avatarUrl    String?
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  memberships  InstallationMember[]
+  feedback     FindingFeedback[]
+
+  @@index([email])
+  @@map("users")
+}
+
+// ==========================================
+// 2. GITHUB INSTALLATIONS
+// ==========================================
+
+model GitHubInstallation {
+  id                  String   @id @default(cuid())
+  githubInstallationId BigInt  @unique
+
+  accountLogin        String
+  accountType         InstallationAccountType
+  targetType          String?
+  suspendedAt         DateTime?
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  members             InstallationMember[]
+  repositories        Repository[]
+  webhookEvents       WebhookEvent[]
+
+  @@index([accountLogin])
+  @@map("github_installations")
+}
+
+model InstallationMember {
+  id             String   @id @default(cuid())
+
+  userId         String
+  installationId String
+  role           MemberRole @default(MEMBER)
+
+  createdAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id],onDelete: Cascade)
+
+  installation GitHubInstallation @relation(fields: [installationId],references: [id],onDelete: Cascade)
+
+  @@unique([userId, installationId])
+  @@index([installationId])
+  @@map("installation_members")
+}
+
+// ==========================================
+// 3. REPOSITORY MANAGEMENT
+// ==========================================
+
+model Repository {
+  id              String   @id @default(cuid())
+
+  githubRepoId    BigInt   @unique
+  installationId  String
+
+  owner           String
+  name            String
+  fullName        String   @unique
+
+  description     String?
+  defaultBranch   String   @default("main")
+  primaryLanguage String?
+
+  isPrivate       Boolean  @default(false)
+  isArchived      Boolean  @default(false)
+  isActive        Boolean  @default(true)
+
+  lastIndexedAt   DateTime?
+  indexedCommitSha String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  installation    GitHubInstallation @relation(fields: [installationId],references: [id],onDelete: Cascade)
+
+  pullRequests    PullRequest[]
+  fileChunks      FileChunk[]
+  symbols         CodeSymbol[]
+
+  @@index([installationId])
+  @@index([owner, name])
+  @@index([isActive])
+  @@map("repositories")
+}
+
+// ==========================================
+// 4. PULL REQUESTS
+// ==========================================
+
+model PullRequest {
+  id                 String   @id @default(cuid())
+
+  repositoryId       String
+  githubPullRequestId BigInt  @unique
+  number             Int
+
+  title              String
+  body               String?
+  authorLogin        String?
+
+  state              PullRequestState @default(OPEN)
+
+  baseBranch         String
+  headBranch         String
+
+  baseSha            String
+  headSha            String
+
+  additions          Int      @default(0)
+  deletions          Int      @default(0)
+  changedFiles       Int      @default(0)
+
+  mergedAt           DateTime?
+  closedAt           DateTime?
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  repository         Repository @relation(fields: [repositoryId],references: [id],onDelete: Cascade)
+
+  analyses           Analysis[]
+
+  @@unique([repositoryId, number])
+  @@index([repositoryId, state])
+  @@index([headSha])
+  @@map("pull_requests")
+}
+
+// ==========================================
+// 5. AI ANALYSIS
+// ==========================================
+
+model Analysis {
+  id              String   @id @default(cuid())
+
+  pullRequestId   String
+
+  // Exact code version analyzed
+  baseSha         String
+  headSha         String
+
+  status          AnalysisStatus @default(PENDING)
+  trigger         AnalysisTrigger @default(WEBHOOK)
+
+  // AI model information
+  modelName       String?
+  promptVersion   String?
+
+  // Analysis output
+  summary         String?  @db.Text
+  riskScore       Int?
+
+  // Token usage and cost tracking
+  inputTokens     Int      @default(0)
+  outputTokens    Int      @default(0)
+  estimatedCost   Decimal? @db.Decimal(12, 6)
+
+  // Processing information
+  startedAt       DateTime?
+  completedAt     DateTime?
+  durationMs      Int?
+  errorMessage    String?  @db.Text
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  pullRequest     PullRequest @relation(fields: [pullRequestId],references: [id],onDelete: Cascade)
+
+  findings        Finding[]
+  publication     ReviewPublication?
+
+  @@index([pullRequestId, createdAt])
+  @@index([status])
+  @@index([headSha])
+  @@map("analyses")
+}
+
+// ==========================================
+// 6. AI FINDINGS
+// ==========================================
+
+model Finding {
+  id              String   @id @default(cuid())
+
+  analysisId      String
+
+  // Finding classification
+  category        FindingCategory
+  severity        FindingSeverity
+  status          FindingStatus @default(OPEN)
+
+  title           String
+  description     String   @db.Text
+  recommendation  String?  @db.Text
+
+  // Location in repository
+  filePath        String
+  startLine       Int
+  endLine         Int?
+
+  // Code evidence
+  codeSnippet     String?  @db.Text
+  evidence        Json?
+
+  // AI confidence (0.0 - 1.0)
+  confidence      Float?
+
+  // Stable identifier to prevent duplicate findings
+  fingerprint     String
+
+  // GitHub inline comment information
+  githubCommentId BigInt?
+  publishedAt     DateTime?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  analysis        Analysis @relation(fields: [analysisId],references: [id],onDelete: Cascade)
+
+  feedback        FindingFeedback[]
+
+  @@unique([analysisId, fingerprint])
+  @@index([analysisId, severity])
+  @@index([analysisId, status])
+  @@index([filePath])
+  @@map("findings")
+}
+
+// ==========================================
+// 7. GITHUB REVIEW PUBLICATION
+// ==========================================
+
+model ReviewPublication {
+  id              String   @id @default(cuid())
+
+  analysisId      String   @unique
+
+  githubReviewId  BigInt?
+  status          PublicationStatus @default(PENDING)
+
+  reviewBody      String?  @db.Text
+  publishedAt     DateTime?
+  errorMessage    String?  @db.Text
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  analysis        Analysis @relation(fields: [analysisId],references: [id],onDelete: Cascade)
+
+  @@index([status])
+  @@map("review_publications")
+}
+
+// ==========================================
+// 8. CODE INTELLIGENCE - FILE CHUNKS
+// ==========================================
+
+model FileChunk {
+  id              String   @id @default(cuid())
+
+  repositoryId    String
+
+  commitSha       String
+  filePath        String
+
+  chunkIndex      Int
+  content         String   @db.Text
+  contentHash     String
+
+  language        String?
+  symbolName      String?
+
+  startLine       Int?
+  endLine         Int?
+
+  // pgvector is managed through a custom SQL migration.
+  embedding       Unsupported("vector(1536)")?
+
+  metadata        Json?
+
+  createdAt       DateTime @default(now())
+
+  repository      Repository @relation(fields: [repositoryId],references: [id],onDelete: Cascade)
+
+  @@unique([repositoryId, commitSha, filePath, chunkIndex])
+  @@index([repositoryId, commitSha])
+  @@index([contentHash])
+  @@map("file_chunks")
+}
+
+// ==========================================
+// 9. CODE INTELLIGENCE - SYMBOLS
+// ==========================================
+
+model CodeSymbol {
+  id              String   @id @default(cuid())
+
+  repositoryId    String
+
+  commitSha       String
+  filePath        String
+
+  name            String
+  qualifiedName   String
+  kind            SymbolKind
+
+  signature       String?  @db.Text
+  startLine       Int
+  endLine         Int?
+
+  metadata        Json?
+
+  createdAt       DateTime @default(now())
+
+  repository      Repository @relation(fields: [repositoryId],references: [id],onDelete: Cascade)
+
+  outgoingEdges   DependencyEdge[] @relation("SourceSymbol")
+  incomingEdges   DependencyEdge[] @relation("TargetSymbol")
+
+  @@unique([repositoryId, commitSha, filePath, qualifiedName])
+  @@index([repositoryId, commitSha])
+  @@index([name])
+  @@index([filePath])
+  @@map("code_symbols")
+}
+
+// ==========================================
+// 10. DEPENDENCY GRAPH
+// ==========================================
+
+model DependencyEdge {
+  id              String   @id @default(cuid())
+
+  sourceSymbolId  String
+  targetSymbolId  String
+
+  kind            DependencyKind
+
+  createdAt       DateTime @default(now())
+
+  source          CodeSymbol @relation("SourceSymbol",fields: [sourceSymbolId],references: [id],onDelete: Cascade)
+
+  target          CodeSymbol @relation("TargetSymbol",fields: [targetSymbolId],references: [id],onDelete: Cascade)
+
+  @@unique([sourceSymbolId, targetSymbolId, kind])
+  @@index([sourceSymbolId])
+  @@index([targetSymbolId])
+  @@map("dependency_edges")
+}
+
+// ==========================================
+// 11. USER FEEDBACK
+// ==========================================
+
+model FindingFeedback {
+  id              String   @id @default(cuid())
+
+  findingId       String
+  userId          String
+
+  type            FeedbackType
+  comment         String?  @db.Text
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  finding         Finding @relation(fields: [findingId],references: [id],onDelete: Cascade)
+
+  user            User @relation(fields: [userId],references: [id],onDelete: Cascade)
+
+  @@unique([findingId, userId])
+  @@index([userId])
+  @@index([type])
+  @@map("finding_feedback")
+}
+
+// ==========================================
+// 12. GITHUB WEBHOOK EVENTS
+// ==========================================
+
+model WebhookEvent {
+  id                  String   @id @default(cuid())
+
+  deliveryId          String   @unique
+  eventName           String
+  action              String?
+
+  installationId      String?
+
+  status              WebhookStatus @default(RECEIVED)
+
+  // Store only the required, sanitized payload.
+  payload             Json?
+
+  attempts            Int      @default(0)
+  errorMessage        String?  @db.Text
+
+  receivedAt          DateTime @default(now())
+  processedAt         DateTime?
+
+  installation        GitHubInstallation? @relation(fields: [installationId],references: [id],onDelete: SetNull)
+
+  @@index([status, receivedAt])
+  @@index([installationId])
+  @@map("webhook_events")
+}
